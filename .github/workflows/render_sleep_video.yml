@@ -4,6 +4,10 @@ on:
   repository_dispatch:
     types: [render_sleep_video]
 
+concurrency:
+  group: sleep-video-render
+  cancel-in-progress: false
+
 jobs:
   render:
     runs-on: ubuntu-latest
@@ -42,12 +46,16 @@ jobs:
           curl -L "$(jq -r '.clip_3_url' payload.json)" -o clips/clip_3.mp4
           ls -lh clips
 
-      - name: Normalize clips
+      - name: Normalize clips in premium quality
         run: |
           mkdir -p normalized
           for f in clips/*.mp4; do
             base=$(basename "$f")
-            ffmpeg -y -i "$f" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" -an -c:v libx264 -preset veryfast -crf 28 "normalized/$base"
+            ffmpeg -y -i "$f" \
+              -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
+              -an \
+              -c:v libx264 -preset slow -crf 22 \
+              "normalized/$base"
           done
 
       - name: Build master loop with smooth transitions
@@ -59,31 +67,40 @@ jobs:
             -i normalized/clip_1.mp4 \
             -filter_complex "[0:v][1:v]xfade=transition=fade:duration=1.2:offset=8.8[v1]; [v1][2:v]xfade=transition=fade:duration=1.2:offset=17.6[v2]; [v2][3:v]xfade=transition=fade:duration=1.2:offset=26.4[vout]" \
             -map "[vout]" \
-            -c:v libx264 -preset veryfast -crf 28 -pix_fmt yuv420p \
+            -c:v libx264 -preset slow -crf 22 -pix_fmt yuv420p \
             master_loop.mp4
 
-      - name: Render final test video
+      - name: Render final 8 hour video in premium quality
         run: |
           DURATION=$(jq -r '.duration_seconds' payload.json)
           OUTFILE=$(jq -r '.final_filename' payload.json)
 
           if [ -z "$DURATION" ] || [ "$DURATION" = "null" ]; then
-            DURATION=600
+            DURATION=28800
           fi
 
           if [ -z "$OUTFILE" ] || [ "$OUTFILE" = "null" ]; then
-            OUTFILE="test-sleep-video.mp4"
+            OUTFILE="deep-sleep-frequency-8-hours.mp4"
           fi
 
           echo "Rendering duration: $DURATION seconds"
           echo "Output file: $OUTFILE"
 
-          ffmpeg -y -stream_loop -1 -i master_loop.mp4 -stream_loop -1 -i audio.mp3 -t "$DURATION" -map 0:v:0 -map 1:a:0 -c:v libx264 -preset veryfast -crf 30 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart "$OUTFILE"
+          ffmpeg -y \
+            -stream_loop -1 -i master_loop.mp4 \
+            -stream_loop -1 -i audio.mp3 \
+            -t "$DURATION" \
+            -map 0:v:0 -map 1:a:0 \
+            -c:v libx264 -preset slow -crf 22 \
+            -pix_fmt yuv420p \
+            -c:a aac -b:a 192k \
+            -movflags +faststart \
+            "$OUTFILE"
 
           ls -lh "$OUTFILE"
 
       - name: Upload video artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rendered-test-video
-          path: test-sleep-video.mp4
+          name: rendered-sleep-video
+          path: "*.mp4"
