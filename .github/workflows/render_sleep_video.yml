@@ -50,14 +50,16 @@ jobs:
             ffmpeg -y -i "$f" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" -an -c:v libx264 -preset veryfast -crf 28 "normalized/$base"
           done
 
-      - name: Build master loop
+      - name: Build master loop with smooth transitions
         run: |
-          rm -f concat.txt
-          for f in normalized/*.mp4; do
-            echo "file '$f'" >> concat.txt
-          done
-          cat concat.txt
-          ffmpeg -y -f concat -safe 0 -i concat.txt -c:v libx264 -preset veryfast -crf 28 -pix_fmt yuv420p master_loop.mp4
+          ffmpeg -y \
+            -i normalized/clip_1.mp4 \
+            -i normalized/clip_2.mp4 \
+            -i normalized/clip_3.mp4 \
+            -filter_complex "[0:v][1:v]xfade=transition=fade:duration=0.8:offset=4.2[v1]; [v1][2:v]xfade=transition=fade:duration=0.8:offset=8.4[vout]" \
+            -map "[vout]" \
+            -c:v libx264 -preset veryfast -crf 28 -pix_fmt yuv420p \
+            master_loop.mp4
 
       - name: Render final test video
         run: |
