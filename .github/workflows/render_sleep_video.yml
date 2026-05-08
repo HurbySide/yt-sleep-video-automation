@@ -4,6 +4,9 @@ on:
   repository_dispatch:
     types: [render_sleep_video]
 
+permissions:
+  contents: write
+
 concurrency:
   group: sleep-video-render
   cancel-in-progress: false
@@ -70,10 +73,10 @@ jobs:
             -c:v libx264 -preset slow -crf 22 -pix_fmt yuv420p \
             master_loop.mp4
 
-      - name: Render final 8 hour video in premium quality
+      - name: Render final video in premium quality
         run: |
-          DURATION=$(jq -r '.duration_seconds' payload.json)
-          OUTFILE=$(jq -r '.final_filename' payload.json)
+          DURATION=$(jq -r '.duration_seconds // "28800"' payload.json)
+          OUTFILE=$(jq -r '.final_filename // "deep-sleep-frequency-8-hours.mp4"' payload.json)
 
           if [ -z "$DURATION" ] || [ "$DURATION" = "null" ]; then
             DURATION=28800
@@ -99,7 +102,66 @@ jobs:
 
           ls -lh "$OUTFILE"
 
-      - name: Upload video artifact
+          echo "OUTFILE=$OUTFILE" >> $GITHUB_ENV
+
+      - name: Create GitHub release with rendered video
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="render-${{ github.run_id }}-$(date +%Y%m%d-%H%M%S)"
+          RELEASE_TITLE="Rendered Sleep Video ${{ github.run_id }}"
+
+          echo "Creating release: $TAG"
+          gh release create "$TAG" "$OUTFILE" \
+            --title "$RELEASE_TITLE" \
+            --notes "Automatically rendered sleep/meditation video."
+
+          VIDEO_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${OUTFILE}"
+
+          echo "TAG=$TAG" >> $GITHUB_ENV
+          echo "VIDEO_URL=$VIDEO_URL" >> $GITHUB_ENV
+
+          echo "Video URL: $VIDEO_URL"
+
+      - name: Call Make webhook after render
+        run: |
+          TITLE=$(jq -r '.title // "Deep Sleep Frequency Music"' payload.json)
+          DESCRIPTION=$(jq -r '.description // "Relaxing sleep and meditation music."' payload.json)
+          TAGS=$(jq -c '.tags // []' payload.json)
+          FILENAME=$(jq -r '.final_filename // env.OUTFILE' payload.json)
+          DURATION=$(jq -r '.duration_seconds // "28800"' payload.json)
+          PRIVACY=$(jq -r '.privacy_status // "private"' payload.json)
+          CATEGORY=$(jq -r '.category_id // "10"' payload.json)
+
+          jq -n \
+            --arg video_url "$VIDEO_URL" \
+            --arg title "$TITLE" \
+            --arg description "$DESCRIPTION" \
+            --arg filename "$FILENAME" \
+            --arg duration_seconds "$DURATION" \
+            --arg privacy_status "$PRIVACY" \
+            --arg category_id "$CATEGORY" \
+            --argjson tags "$TAGS" \
+            '{
+              video_url: $video_url,
+              title: $title,
+              description: $description,
+              tags: $tags,
+              filename: $filename,
+              duration_seconds: $duration_seconds,
+              privacy_status: $privacy_status,
+              category_id: $category_id,
+              made_for_kids: false,
+              contains_synthetic_media: true
+            }' > make_payload.json
+
+          cat make_payload.json
+
+          curl -X POST "https://hook.eu1.make.com/pfbxomjur1dxwvitezo354tv3hpyso85" \
+            -H "Content-Type: application/json" \
+            --data-binary @make_payload.json
+
+      - name: Upload video artifact backup
         uses: actions/upload-artifact@v4
         with:
           name: rendered-sleep-video
