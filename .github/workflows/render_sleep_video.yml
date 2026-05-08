@@ -56,7 +56,8 @@ jobs:
             -i normalized/clip_1.mp4 \
             -i normalized/clip_2.mp4 \
             -i normalized/clip_3.mp4 \
-            -filter_complex "[0:v][1:v]xfade=transition=fade:duration=0.8:offset=4.2[v1]; [v1][2:v]xfade=transition=fade:duration=0.8:offset=8.4[vout]" \
+            -i normalized/clip_1.mp4 \
+            -filter_complex "[0:v][1:v]xfade=transition=fade:duration=1.2:offset=8.8[v1]; [v1][2:v]xfade=transition=fade:duration=1.2:offset=17.6[v2]; [v2][3:v]xfade=transition=fade:duration=1.2:offset=26.4[vout]" \
             -map "[vout]" \
             -c:v libx264 -preset veryfast -crf 28 -pix_fmt yuv420p \
             master_loop.mp4
