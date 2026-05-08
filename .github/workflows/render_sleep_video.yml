@@ -31,7 +31,7 @@ jobs:
         run: |
           AUDIO_ID=$(jq -r '.source_audio_file_id' payload.json)
           echo "Downloading audio file: $AUDIO_ID"
-          gdown --id "$AUDIO_ID" -O audio.mp3
+          gdown "https://drive.google.com/uc?id=$AUDIO_ID" -O audio.mp3
           ls -lh audio.mp3
 
       - name: Download AI video clips
