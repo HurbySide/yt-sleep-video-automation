@@ -1,0 +1,76 @@
+name: Render Sleep/Meditation Video
+
+on:
+  repository_dispatch:
+    types: [render_sleep_video]
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install FFmpeg and Python deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq
+          python -m pip install --upgrade pip
+          pip install google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib requests
+      - name: Save payload
+        run: |
+          cat > payload.json <<'JSON'
+          ${{ toJson(github.event.client_payload) }}
+          JSON
+          cat payload.json | jq .
+      - name: Download source MP3 from Google Drive
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          python scripts/gdrive_download.py --service-account-json "$GDRIVE_SERVICE_ACCOUNT_JSON" --file-id "$(jq -r '.source_audio_file_id' payload.json)" --output "audio.mp3"
+      - name: Download AI video clips from fal.ai URLs
+        run: |
+          mkdir -p clips
+          jq -r '.clip_urls[]' payload.json > clip_urls.txt
+          i=1
+          while read -r url; do
+            echo "Downloading clip $i: $url"
+            curl -L --retry 5 --retry-delay 10 "$url" -o "clips/clip_${i}.mp4"
+            i=$((i+1))
+          done < clip_urls.txt
+          ls -lh clips
+      - name: Normalize clips
+        run: |
+          mkdir -p normalized
+          for f in clips/*.mp4; do
+            base=$(basename "$f")
+            ffmpeg -y -i "$f" -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" -an -c:v libx264 -preset veryfast -crf 28 "normalized/$base"
+          done
+      - name: Build master visual loop
+        run: |
+          printf "file '%s'
+" normalized/*.mp4 > concat.txt
+          ffmpeg -y -f concat -safe 0 -i concat.txt -c:v libx264 -preset veryfast -crf 28 -pix_fmt yuv420p master_loop.mp4
+      - name: Render final MP4
+        run: |
+          TEST_MODE=$(jq -r '.test_mode' payload.json)
+          if [ "$TEST_MODE" = "true" ]; then DURATION=$(jq -r '.render.test_duration_seconds' payload.json); else DURATION=$(jq -r '.render.final_duration_seconds' payload.json); fi
+          OUTFILE=$(jq -r '.youtube.file_name' payload.json)
+          if [ -z "$OUTFILE" ] || [ "$OUTFILE" = "null" ]; then OUTFILE="output.mp4"; fi
+          ffmpeg -y -stream_loop -1 -i master_loop.mp4 -stream_loop -1 -i audio.mp3 -t "$DURATION" -map 0:v:0 -map 1:a:0 -c:v libx264 -preset veryfast -crf 30 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart "$OUTFILE"
+          echo "$OUTFILE" > output_filename.txt
+          ls -lh "$OUTFILE"
+      - name: Upload final MP4 to Google Drive
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          OUTFILE=$(cat output_filename.txt)
+          python scripts/gdrive_upload.py --service-account-json "$GDRIVE_SERVICE_ACCOUNT_JSON" --folder-id "$(jq -r '.gdrive_output_folder_id' payload.json)" --file "$OUTFILE" --mime-type "video/mp4" --out-json upload_result.json
+          cat upload_result.json
+      - name: Callback to Make.com finish webhook
+        run: |
+          CALLBACK=$(jq -r '.callback.make_webhook_url' payload.json)
+          VIDEO_ID=$(jq -r '.id' upload_result.json)
+          FILE_NAME=$(cat output_filename.txt)
+          jq -n --arg status "success" --arg job_id "$(jq -r '.job_id' payload.json)" --arg gdrive_video_file_id "$VIDEO_ID" --arg file_name "$FILE_NAME" --arg title "$(jq -r '.youtube.title' payload.json)" --arg description "$(jq -r '.youtube.description' payload.json)" --arg category_id "$(jq -r '.youtube.category_id' payload.json)" --arg privacy_status "$(jq -r '.youtube.privacy_status' payload.json)" --arg pinned_comment "$(jq -r '.youtube.pinned_comment' payload.json)" --arg source_audio_file_id "$(jq -r '.source_audio_file_id' payload.json)" --argjson tags "$(jq '.youtube.tags' payload.json)" --argjson contains_synthetic_media "$(jq '.youtube.contains_synthetic_media' payload.json)" '{status:$status, job_id:$job_id, gdrive_video_file_id:$gdrive_video_file_id, file_name:$file_name, title:$title, description:$description, tags:$tags, category_id:$category_id, privacy_status:$privacy_status, contains_synthetic_media:$contains_synthetic_media, pinned_comment:$pinned_comment, source_audio_file_id:$source_audio_file_id}' > callback_payload.json
+          curl -X POST "$CALLBACK" -H "Content-Type: application/json" --data-binary @callback_payload.json
