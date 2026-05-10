@@ -37,7 +37,14 @@ jobs:
       - name: Download audio from Google Drive
         run: |
           AUDIO_ID=$(jq -r '.source_audio_file_id' payload.json)
+
           echo "Downloading audio file: $AUDIO_ID"
+
+          if [ -z "$AUDIO_ID" ] || [ "$AUDIO_ID" = "null" ]; then
+            echo "Missing source_audio_file_id"
+            exit 1
+          fi
+
           gdown "https://drive.google.com/uc?id=$AUDIO_ID" -O audio.mp3
           ls -lh audio.mp3
 
@@ -81,19 +88,25 @@ jobs:
           ffmpeg -y -i clips/clip_1.mp4 \
             -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
             -an \
-            -c:v libx264 -preset fast -crf 23 \
+            -c:v libx264 \
+            -preset fast \
+            -crf 24 \
             normalized/clip_1.mp4
 
           ffmpeg -y -i clips/clip_2.mp4 \
             -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
             -an \
-            -c:v libx264 -preset fast -crf 23 \
+            -c:v libx264 \
+            -preset fast \
+            -crf 24 \
             normalized/clip_2.mp4
 
           ffmpeg -y -i clips/clip_3.mp4 \
             -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
             -an \
-            -c:v libx264 -preset fast -crf 23 \
+            -c:v libx264 \
+            -preset fast \
+            -crf 24 \
             normalized/clip_3.mp4
 
           ls -lh normalized
@@ -109,12 +122,13 @@ jobs:
             -map "[vout]" \
             -c:v libx264 \
             -preset fast \
-            -b:v 700k \
-            -maxrate 900k \
-            -bufsize 1800k \
+            -b:v 600k \
+            -maxrate 750k \
+            -bufsize 1500k \
             -pix_fmt yuv420p \
             master_loop.mp4
 
+          echo "Master loop size:"
           ls -lh master_loop.mp4
 
       - name: Render final video fast
@@ -145,6 +159,7 @@ jobs:
             -movflags +faststart \
             "$OUTFILE"
 
+          echo "Final video:"
           ls -lh "$OUTFILE"
 
           FILE_SIZE=$(stat -c%s "$OUTFILE")
