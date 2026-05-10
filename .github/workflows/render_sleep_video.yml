@@ -44,22 +44,59 @@ jobs:
       - name: Download AI video clips
         run: |
           mkdir -p clips
-          curl -L "$(jq -r '.clip_1_url' payload.json)" -o clips/clip_1.mp4
-          curl -L "$(jq -r '.clip_2_url' payload.json)" -o clips/clip_2.mp4
-          curl -L "$(jq -r '.clip_3_url' payload.json)" -o clips/clip_3.mp4
+
+          CLIP_1_URL=$(jq -r '.clip_1_url' payload.json)
+          CLIP_2_URL=$(jq -r '.clip_2_url' payload.json)
+          CLIP_3_URL=$(jq -r '.clip_3_url' payload.json)
+
+          echo "Clip 1 URL: $CLIP_1_URL"
+          echo "Clip 2 URL: $CLIP_2_URL"
+          echo "Clip 3 URL: $CLIP_3_URL"
+
+          if [ -z "$CLIP_1_URL" ] || [ "$CLIP_1_URL" = "null" ]; then
+            echo "Missing clip_1_url"
+            exit 1
+          fi
+
+          if [ -z "$CLIP_2_URL" ] || [ "$CLIP_2_URL" = "null" ]; then
+            echo "Missing clip_2_url"
+            exit 1
+          fi
+
+          if [ -z "$CLIP_3_URL" ] || [ "$CLIP_3_URL" = "null" ]; then
+            echo "Missing clip_3_url"
+            exit 1
+          fi
+
+          curl -L "$CLIP_1_URL" -o clips/clip_1.mp4
+          curl -L "$CLIP_2_URL" -o clips/clip_2.mp4
+          curl -L "$CLIP_3_URL" -o clips/clip_3.mp4
+
           ls -lh clips
 
       - name: Normalize clips
         run: |
           mkdir -p normalized
-          for f in clips/*.mp4; do
-            base=$(basename "$f")
-            ffmpeg -y -i "$f" \
-              -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
-              -an \
-              -c:v libx264 -preset fast -crf 24 \
-              "normalized/$base"
-          done
+
+          ffmpeg -y -i clips/clip_1.mp4 \
+            -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
+            -an \
+            -c:v libx264 -preset fast -crf 23 \
+            normalized/clip_1.mp4
+
+          ffmpeg -y -i clips/clip_2.mp4 \
+            -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
+            -an \
+            -c:v libx264 -preset fast -crf 23 \
+            normalized/clip_2.mp4
+
+          ffmpeg -y -i clips/clip_3.mp4 \
+            -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
+            -an \
+            -c:v libx264 -preset fast -crf 23 \
+            normalized/clip_3.mp4
+
+          ls -lh normalized
 
       - name: Build master loop with smooth transitions
         run: |
@@ -70,20 +107,27 @@ jobs:
             -i normalized/clip_1.mp4 \
             -filter_complex "[0:v][1:v]xfade=transition=fade:duration=1.2:offset=8.8[v1]; [v1][2:v]xfade=transition=fade:duration=1.2:offset=17.6[v2]; [v2][3:v]xfade=transition=fade:duration=1.2:offset=26.4[vout]" \
             -map "[vout]" \
-            -c:v libx264 -preset fast -crf 24 -pix_fmt yuv420p \
+            -c:v libx264 \
+            -preset fast \
+            -b:v 700k \
+            -maxrate 900k \
+            -bufsize 1800k \
+            -pix_fmt yuv420p \
             master_loop.mp4
+
+          ls -lh master_loop.mp4
 
       - name: Render final video fast
         run: |
-          DURATION=$(jq -r '.duration_seconds // "28800"' payload.json)
-          OUTFILE=$(jq -r '.final_filename // "deep-sleep-frequency-8-hours.mp4"' payload.json)
+          DURATION=$(jq -r '.duration_seconds // "14400"' payload.json)
+          OUTFILE=$(jq -r '.final_filename // "deep-sleep-frequency-4-hours.mp4"' payload.json)
 
           if [ -z "$DURATION" ] || [ "$DURATION" = "null" ]; then
-            DURATION=28800
+            DURATION=14400
           fi
 
           if [ -z "$OUTFILE" ] || [ "$OUTFILE" = "null" ]; then
-            OUTFILE="deep-sleep-frequency-8-hours.mp4"
+            OUTFILE="deep-sleep-frequency-4-hours.mp4"
           fi
 
           echo "Rendering duration: $DURATION seconds"
@@ -93,15 +137,22 @@ jobs:
             -stream_loop -1 -i master_loop.mp4 \
             -stream_loop -1 -i audio.mp3 \
             -t "$DURATION" \
-            -map 0:v:0 -map 1:a:0 \
+            -map 0:v:0 \
+            -map 1:a:0 \
             -c:v copy \
-            -c:a aac -b:a 160k \
+            -c:a aac \
+            -b:a 128k \
             -movflags +faststart \
             "$OUTFILE"
 
           ls -lh "$OUTFILE"
 
+          FILE_SIZE=$(stat -c%s "$OUTFILE")
+          echo "Final file size in bytes: $FILE_SIZE"
+          echo "GitHub Release asset limit: 2147483648 bytes"
+
           echo "OUTFILE=$OUTFILE" >> $GITHUB_ENV
+          echo "FILE_SIZE=$FILE_SIZE" >> $GITHUB_ENV
 
       - name: Create GitHub release with rendered video
         env:
@@ -111,6 +162,14 @@ jobs:
           RELEASE_TITLE="Rendered Sleep Video ${{ github.run_id }}"
 
           echo "Creating release: $TAG"
+          echo "File size: $FILE_SIZE bytes"
+
+          if [ "$FILE_SIZE" -ge 2147483648 ]; then
+            echo "File is too large for GitHub Release asset."
+            echo "Max allowed size is 2147483648 bytes."
+            exit 1
+          fi
+
           gh release create "$TAG" "$OUTFILE" \
             --title "$RELEASE_TITLE" \
             --notes "Automatically rendered sleep/meditation video."
@@ -128,7 +187,7 @@ jobs:
           DESCRIPTION=$(jq -r '.description // "Relaxing sleep and meditation music."' payload.json)
           TAGS=$(jq -c '.tags // []' payload.json)
           FILENAME=$(jq -r '.final_filename // env.OUTFILE' payload.json)
-          DURATION=$(jq -r '.duration_seconds // "28800"' payload.json)
+          DURATION=$(jq -r '.duration_seconds // "14400"' payload.json)
           PRIVACY=$(jq -r '.privacy_status // "private"' payload.json)
           CATEGORY=$(jq -r '.category_id // "10"' payload.json)
 
