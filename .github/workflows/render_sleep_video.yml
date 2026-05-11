@@ -25,7 +25,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg jq
           python -m pip install --upgrade pip
-          pip install gdown
+          pip install gdown google-api-python-client google-auth google-auth-httplib2
 
       - name: Save payload
         run: |
@@ -164,75 +164,124 @@ jobs:
 
           FILE_SIZE=$(stat -c%s "$OUTFILE")
           echo "Final file size in bytes: $FILE_SIZE"
-          echo "GitHub Release asset limit: 2147483648 bytes"
 
           echo "OUTFILE=$OUTFILE" >> $GITHUB_ENV
           echo "FILE_SIZE=$FILE_SIZE" >> $GITHUB_ENV
 
-      - name: Create GitHub release with rendered video
+      - name: Upload video directly to YouTube
+        env:
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+        run: |
+          python <<'PY'
+          import os
+          import json
+          from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+          from googleapiclient.http import MediaFileUpload
+
+          with open("payload.json", "r", encoding="utf-8") as f:
+              payload = json.load(f)
+
+          title = payload.get("title") or "Deep Sleep Music | 4 Hours Peaceful Night Sky Meditation"
+          description = payload.get("description") or (
+              "Relax into deep rest with peaceful deep sleep music, calming night sky ambience, "
+              "and soothing meditation sounds created for relaxation, sleep, focus, and quiet evening routines."
+          )
+
+          category_id = str(payload.get("category_id") or "10")
+          privacy_status = payload.get("privacy_status") or "private"
+          outfile = os.environ.get("OUTFILE", "deep-sleep-frequency-4-hours.mp4")
+
+          tags = [
+              "deep sleep music",
+              "sleep music",
+              "meditation music",
+              "relaxing music",
+              "night sky music",
+              "4 hours sleep music",
+              "calming music",
+              "peaceful sleep",
+              "ambient sleep music",
+              "healing frequency music",
+              "reiki music",
+              "stress relief music",
+              "relaxation music",
+              "sleep meditation",
+              "deep relaxation"
+          ]
+
+          creds = Credentials(
+              token=None,
+              refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
+              token_uri="https://oauth2.googleapis.com/token",
+              client_id=os.environ["YOUTUBE_CLIENT_ID"],
+              client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
+              scopes=["https://www.googleapis.com/auth/youtube.upload"]
+          )
+
+          creds.refresh(Request())
+
+          youtube = build("youtube", "v3", credentials=creds)
+
+          body = {
+              "snippet": {
+                  "title": title[:100],
+                  "description": description[:5000],
+                  "tags": tags,
+                  "categoryId": category_id
+              },
+              "status": {
+                  "privacyStatus": privacy_status,
+                  "selfDeclaredMadeForKids": False
+              }
+          }
+
+          media = MediaFileUpload(
+              outfile,
+              chunksize=8 * 1024 * 1024,
+              resumable=True,
+              mimetype="video/mp4"
+          )
+
+          request = youtube.videos().insert(
+              part="snippet,status",
+              body=body,
+              media_body=media
+          )
+
+          response = None
+          while response is None:
+              status, response = request.next_chunk()
+              if status:
+                  print(f"Upload progress: {int(status.progress() * 100)}%")
+
+          print("YouTube upload complete.")
+          print("Video ID:", response.get("id"))
+          print("Video URL:", f"https://www.youtube.com/watch?v={response.get('id')}")
+          PY
+
+      - name: Create GitHub release backup
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="render-${{ github.run_id }}-$(date +%Y%m%d-%H%M%S)"
           RELEASE_TITLE="Rendered Sleep Video ${{ github.run_id }}"
 
-          echo "Creating release: $TAG"
+          echo "Creating backup release: $TAG"
           echo "File size: $FILE_SIZE bytes"
 
           if [ "$FILE_SIZE" -ge 2147483648 ]; then
             echo "File is too large for GitHub Release asset."
-            echo "Max allowed size is 2147483648 bytes."
-            exit 1
+            echo "Skipping GitHub release backup."
+            exit 0
           fi
 
           gh release create "$TAG" "$OUTFILE" \
             --title "$RELEASE_TITLE" \
-            --notes "Automatically rendered sleep/meditation video."
-
-          VIDEO_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${OUTFILE}"
-
-          echo "TAG=$TAG" >> $GITHUB_ENV
-          echo "VIDEO_URL=$VIDEO_URL" >> $GITHUB_ENV
-
-          echo "Video URL: $VIDEO_URL"
-
-      - name: Call Make webhook after render
-        run: |
-          TITLE=$(jq -r '.title // "Deep Sleep Frequency Music"' payload.json)
-          DESCRIPTION=$(jq -r '.description // "Relaxing sleep and meditation music."' payload.json)
-          TAGS=$(jq -c '.tags // []' payload.json)
-          FILENAME=$(jq -r '.final_filename // env.OUTFILE' payload.json)
-          DURATION=$(jq -r '.duration_seconds // "14400"' payload.json)
-          PRIVACY=$(jq -r '.privacy_status // "private"' payload.json)
-          CATEGORY=$(jq -r '.category_id // "10"' payload.json)
-
-          jq -n \
-            --arg video_url "$VIDEO_URL" \
-            --arg title "$TITLE" \
-            --arg description "$DESCRIPTION" \
-            --arg filename "$FILENAME" \
-            --arg duration_seconds "$DURATION" \
-            --arg privacy_status "$PRIVACY" \
-            --arg category_id "$CATEGORY" \
-            --argjson tags "$TAGS" \
-            '{
-              video_url: $video_url,
-              title: $title,
-              description: $description,
-              tags: $tags,
-              filename: $filename,
-              duration_seconds: $duration_seconds,
-              privacy_status: $privacy_status,
-              category_id: $category_id,
-              made_for_kids: false,
-              contains_synthetic_media: true
-            }' > make_payload.json
-
-          cat make_payload.json
-
-          curl -X POST "https://hook.eu1.make.com/pfbxomjur1dxwvitezo354tv3hpyso85" \
-            -H "Content-Type: application/json" \
-            --data-binary @make_payload.json
+            --notes "Automatically rendered sleep/meditation video backup."
 
       - name: Upload video artifact backup
         uses: actions/upload-artifact@v4
