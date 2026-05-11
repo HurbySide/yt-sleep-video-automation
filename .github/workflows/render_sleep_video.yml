@@ -42,6 +42,11 @@ jobs:
             exit 1
           fi
 
+          if ! jq -e '.clips | type == "array"' payload.json > /dev/null; then
+            echo "ERROR: client_payload.clips must be an array"
+            exit 1
+          fi
+
           CLIP_COUNT=$(jq '.clips | length' payload.json)
 
           if [ "$CLIP_COUNT" -ne 8 ]; then
@@ -60,11 +65,14 @@ jobs:
           echo "Clip count: $CLIP_COUNT"
           echo "Audio file ID: $AUDIO_ID"
 
+          echo "Clip URL order received from Make:"
+          jq -r '.clips[]' payload.json | nl -w2 -s". "
+
       - name: Install system dependencies
         shell: bash
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg jq python3-pip
+          sudo apt-get install -y ffmpeg jq python3-pip curl
 
           ffmpeg -version
           jq --version
@@ -104,7 +112,7 @@ jobs:
           echo "Audio downloaded:"
           ls -lh source_audio.mp3
 
-      - name: Download 8 AI video clips
+      - name: Download 8 AI video clips in payload order
         shell: bash
         run: |
           set -euo pipefail
@@ -120,7 +128,9 @@ jobs:
               exit 1
             fi
 
-            echo "Downloading clip $i..."
+            echo "Downloading clip $i from:"
+            echo "$url"
+
             curl -L \
               --retry 5 \
               --retry-delay 10 \
@@ -187,12 +197,20 @@ jobs:
           echo "Normalized clips:"
           ls -lh normalized/
 
-      - name: Create 73-second master loop from 8 clips
+      - name: Create master loop from 8 clips
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Creating master loop with smooth transitions..."
+          echo "Creating master loop from ordered clips:"
+          echo "01 = Make HTTP 11"
+          echo "02 = Make HTTP 12"
+          echo "03 = Make HTTP 13"
+          echo "04 = Make HTTP 42"
+          echo "05 = Make HTTP 43"
+          echo "06 = Make HTTP 44"
+          echo "07 = Make HTTP 46"
+          echo "08 = Make HTTP 50"
 
           ffmpeg -y \
             -i normalized/clip_01.mp4 \
@@ -284,7 +302,6 @@ jobs:
           cat > scripts/upload_to_youtube.py <<'PY'
           import json
           import os
-          import sys
           import time
           import random
 
@@ -343,11 +360,12 @@ jobs:
 
                   if error:
                       retry += 1
+
                       if retry > max_retries:
                           raise RuntimeError(f"Upload failed after {max_retries} retries. Last error: {error}")
 
                       sleep_seconds = min((2 ** retry) + random.random(), 120)
-                      print(f"{error}")
+                      print(error)
                       print(f"Retrying in {sleep_seconds:.1f}s...")
                       time.sleep(sleep_seconds)
                       error = None
@@ -367,7 +385,7 @@ jobs:
 
               title = clean_text(
                   payload.get("title"),
-                  "Deep Sleep Music | 4 Hours Relaxing Night Sky Meditation"
+                  "Deep Healing Frequency Music | 4 Hours Overnight Sleep Meditation"
               )
 
               description = clean_text(
@@ -471,7 +489,7 @@ jobs:
 
           python3 scripts/upload_to_youtube.py
 
-      - name: Upload small logs as artifact
+      - name: Upload logs as artifact
         if: always()
         continue-on-error: true
         uses: actions/upload-artifact@v4
