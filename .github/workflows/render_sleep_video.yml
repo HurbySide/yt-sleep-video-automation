@@ -1,4 +1,4 @@
-name: Render Sleep/Meditation Video
+name: Render Sleep Video
 
 on:
   repository_dispatch:
@@ -7,284 +7,490 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: sleep-video-render
-  cancel-in-progress: false
+env:
+  FINAL_VIDEO_PATH: output/final_sleep_video.mp4
+  MASTER_LOOP_PATH: output/master_loop.mp4
+  CREATE_ARTIFACT_BACKUP: "false"
 
 jobs:
-  render:
+  render-and-upload:
+    name: Render 4h Sleep Video and Upload to YouTube
     runs-on: ubuntu-latest
     timeout-minutes: 360
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg jq
-          python -m pip install --upgrade pip
-          pip install gdown google-api-python-client google-auth google-auth-httplib2
-
-      - name: Save payload
+      - name: Save repository dispatch payload
+        shell: bash
         run: |
           cat > payload.json <<'JSON'
           ${{ toJson(github.event.client_payload) }}
           JSON
-          cat payload.json | jq .
 
-      - name: Download audio from Google Drive
+          echo "Payload saved:"
+          jq . payload.json
+
+      - name: Validate payload
+        shell: bash
         run: |
-          AUDIO_ID=$(jq -r '.source_audio_file_id' payload.json)
+          set -euo pipefail
 
-          echo "Downloading audio file: $AUDIO_ID"
+          if ! jq -e '.clips' payload.json > /dev/null; then
+            echo "ERROR: Missing client_payload.clips"
+            exit 1
+          fi
+
+          CLIP_COUNT=$(jq '.clips | length' payload.json)
+
+          if [ "$CLIP_COUNT" -ne 8 ]; then
+            echo "ERROR: Expected exactly 8 clips, got $CLIP_COUNT"
+            exit 1
+          fi
+
+          AUDIO_ID=$(jq -r '.source_audio_file_id // empty' payload.json)
 
           if [ -z "$AUDIO_ID" ] || [ "$AUDIO_ID" = "null" ]; then
-            echo "Missing source_audio_file_id"
+            echo "ERROR: Missing source_audio_file_id"
             exit 1
           fi
 
-          gdown "https://drive.google.com/uc?id=$AUDIO_ID" -O audio.mp3
-          ls -lh audio.mp3
+          echo "Payload valid."
+          echo "Clip count: $CLIP_COUNT"
+          echo "Audio file ID: $AUDIO_ID"
 
-      - name: Download AI video clips
+      - name: Install system dependencies
+        shell: bash
         run: |
-          mkdir -p clips
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg jq python3-pip
 
-          CLIP_1_URL=$(jq -r '.clip_1_url' payload.json)
-          CLIP_2_URL=$(jq -r '.clip_2_url' payload.json)
-          CLIP_3_URL=$(jq -r '.clip_3_url' payload.json)
+          ffmpeg -version
+          jq --version
+          python3 --version
 
-          echo "Clip 1 URL: $CLIP_1_URL"
-          echo "Clip 2 URL: $CLIP_2_URL"
-          echo "Clip 3 URL: $CLIP_3_URL"
-
-          if [ -z "$CLIP_1_URL" ] || [ "$CLIP_1_URL" = "null" ]; then
-            echo "Missing clip_1_url"
-            exit 1
-          fi
-
-          if [ -z "$CLIP_2_URL" ] || [ "$CLIP_2_URL" = "null" ]; then
-            echo "Missing clip_2_url"
-            exit 1
-          fi
-
-          if [ -z "$CLIP_3_URL" ] || [ "$CLIP_3_URL" = "null" ]; then
-            echo "Missing clip_3_url"
-            exit 1
-          fi
-
-          curl -L "$CLIP_1_URL" -o clips/clip_1.mp4
-          curl -L "$CLIP_2_URL" -o clips/clip_2.mp4
-          curl -L "$CLIP_3_URL" -o clips/clip_3.mp4
-
-          ls -lh clips
-
-      - name: Normalize clips
+      - name: Install Python dependencies
+        shell: bash
         run: |
-          mkdir -p normalized
+          python3 -m pip install --upgrade pip
+          python3 -m pip install \
+            gdown \
+            google-api-python-client \
+            google-auth \
+            google-auth-oauthlib \
+            google-auth-httplib2
 
-          ffmpeg -y -i clips/clip_1.mp4 \
-            -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
-            -an \
-            -c:v libx264 \
-            -preset fast \
-            -crf 22 \
-            normalized/clip_1.mp4
-
-          ffmpeg -y -i clips/clip_2.mp4 \
-            -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
-            -an \
-            -c:v libx264 \
-            -preset fast \
-            -crf 22 \
-            normalized/clip_2.mp4
-
-          ffmpeg -y -i clips/clip_3.mp4 \
-            -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p" \
-            -an \
-            -c:v libx264 \
-            -preset fast \
-            -crf 22 \
-            normalized/clip_3.mp4
-
-          ls -lh normalized
-
-      - name: Build master loop with smooth transitions
+      - name: Prepare folders
+        shell: bash
         run: |
+          mkdir -p clips raw normalized output scripts
+
+      - name: Download source audio from Google Drive
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AUDIO_ID=$(jq -r '.source_audio_file_id' payload.json)
+
+          echo "Downloading audio from Google Drive..."
+          python3 -m gdown "https://drive.google.com/uc?id=${AUDIO_ID}" -O source_audio.mp3
+
+          if [ ! -s source_audio.mp3 ]; then
+            echo "ERROR: Audio download failed or file is empty."
+            exit 1
+          fi
+
+          echo "Audio downloaded:"
+          ls -lh source_audio.mp3
+
+      - name: Download 8 AI video clips
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          jq -r '.clips[]' payload.json > clip_urls.txt
+
+          i=1
+          while read -r url; do
+            num=$(printf "%02d" "$i")
+
+            if [ -z "$url" ] || [ "$url" = "null" ]; then
+              echo "ERROR: Clip URL $i is empty."
+              exit 1
+            fi
+
+            echo "Downloading clip $i..."
+            curl -L \
+              --retry 5 \
+              --retry-delay 10 \
+              --connect-timeout 30 \
+              --max-time 1800 \
+              "$url" \
+              -o "raw/clip_${num}.mp4"
+
+            if [ ! -s "raw/clip_${num}.mp4" ]; then
+              echo "ERROR: Downloaded clip $i is empty."
+              exit 1
+            fi
+
+            echo "Clip $i downloaded:"
+            ls -lh "raw/clip_${num}.mp4"
+
+            i=$((i + 1))
+          done < clip_urls.txt
+
+      - name: Inspect raw clips
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for f in raw/*.mp4; do
+            echo "=============================="
+            echo "$f"
+            ffprobe -v error \
+              -show_entries format=duration,size \
+              -show_entries stream=codec_type,codec_name,width,height,r_frame_rate,avg_frame_rate \
+              -of default=noprint_wrappers=1 "$f" || true
+          done
+
+      - name: Normalize clips to 1920x1080 30fps
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TARGET_CLIP_SECONDS=10
+
+          for i in 1 2 3 4 5 6 7 8; do
+            num=$(printf "%02d" "$i")
+
+            echo "Normalizing clip $i..."
+
+            ffmpeg -y \
+              -stream_loop -1 \
+              -i "raw/clip_${num}.mp4" \
+              -t "$TARGET_CLIP_SECONDS" \
+              -an \
+              -vf "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,format=yuv420p,setsar=1" \
+              -c:v libx264 \
+              -preset veryfast \
+              -crf 20 \
+              -movflags +faststart \
+              "normalized/clip_${num}.mp4"
+
+            if [ ! -s "normalized/clip_${num}.mp4" ]; then
+              echo "ERROR: Normalized clip $i is empty."
+              exit 1
+            fi
+          done
+
+          echo "Normalized clips:"
+          ls -lh normalized/
+
+      - name: Create 73-second master loop from 8 clips
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Creating master loop with smooth transitions..."
+
           ffmpeg -y \
-            -i normalized/clip_1.mp4 \
-            -i normalized/clip_2.mp4 \
-            -i normalized/clip_3.mp4 \
-            -i normalized/clip_1.mp4 \
-            -filter_complex "[0:v][1:v]xfade=transition=fade:duration=1.2:offset=8.8[v1]; [v1][2:v]xfade=transition=fade:duration=1.2:offset=17.6[v2]; [v2][3:v]xfade=transition=fade:duration=1.2:offset=26.4[vout]; [vout]trim=duration=27.6,setpts=PTS-STARTPTS[vfinal]" \
-            -map "[vfinal]" \
+            -i normalized/clip_01.mp4 \
+            -i normalized/clip_02.mp4 \
+            -i normalized/clip_03.mp4 \
+            -i normalized/clip_04.mp4 \
+            -i normalized/clip_05.mp4 \
+            -i normalized/clip_06.mp4 \
+            -i normalized/clip_07.mp4 \
+            -i normalized/clip_08.mp4 \
+            -filter_complex "\
+              [0:v][1:v]xfade=transition=fade:duration=1:offset=9[v01]; \
+              [v01][2:v]xfade=transition=fade:duration=1:offset=18[v02]; \
+              [v02][3:v]xfade=transition=fade:duration=1:offset=27[v03]; \
+              [v03][4:v]xfade=transition=fade:duration=1:offset=36[v04]; \
+              [v04][5:v]xfade=transition=fade:duration=1:offset=45[v05]; \
+              [v05][6:v]xfade=transition=fade:duration=1:offset=54[v06]; \
+              [v06][7:v]xfade=transition=fade:duration=1:offset=63[vout]" \
+            -map "[vout]" \
+            -an \
             -c:v libx264 \
-            -preset fast \
-            -b:v 950k \
-            -maxrate 1100k \
-            -bufsize 2200k \
+            -preset veryfast \
+            -crf 20 \
             -pix_fmt yuv420p \
-            master_loop.mp4
+            -r 30 \
+            -movflags +faststart \
+            "$MASTER_LOOP_PATH"
 
-          echo "Master loop size:"
-          ls -lh master_loop.mp4
+          if [ ! -s "$MASTER_LOOP_PATH" ]; then
+            echo "ERROR: Master loop was not created."
+            exit 1
+          fi
 
-      - name: Render final video fast
+          echo "Master loop created:"
+          ls -lh "$MASTER_LOOP_PATH"
+
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 "$MASTER_LOOP_PATH"
+
+      - name: Render final long video
+        shell: bash
         run: |
-          DURATION=$(jq -r '.duration_seconds // "14400"' payload.json)
-          OUTFILE=$(jq -r '.final_filename // "deep-sleep-frequency-4-hours.mp4"' payload.json)
+          set -euo pipefail
 
-          if [ -z "$DURATION" ] || [ "$DURATION" = "null" ]; then
-            DURATION=14400
+          DURATION_SECONDS=$(jq -r '.duration_seconds // .final_duration_seconds // 14400' payload.json)
+
+          if [ -z "$DURATION_SECONDS" ] || [ "$DURATION_SECONDS" = "null" ]; then
+            DURATION_SECONDS=14400
           fi
 
-          if [ -z "$OUTFILE" ] || [ "$OUTFILE" = "null" ]; then
-            OUTFILE="deep-sleep-frequency-4-hours.mp4"
-          fi
-
-          echo "Rendering duration: $DURATION seconds"
-          echo "Output file: $OUTFILE"
+          echo "Rendering final video duration: ${DURATION_SECONDS}s"
 
           ffmpeg -y \
-            -stream_loop -1 -i master_loop.mp4 \
-            -stream_loop -1 -i audio.mp3 \
-            -t "$DURATION" \
+            -stream_loop -1 \
+            -i "$MASTER_LOOP_PATH" \
+            -i source_audio.mp3 \
+            -t "$DURATION_SECONDS" \
             -map 0:v:0 \
             -map 1:a:0 \
-            -c:v copy \
+            -c:v libx264 \
+            -preset veryfast \
+            -crf 23 \
+            -pix_fmt yuv420p \
+            -r 30 \
             -c:a aac \
-            -b:a 96k \
+            -b:a 192k \
+            -ar 48000 \
+            -ac 2 \
+            -shortest \
             -movflags +faststart \
-            "$OUTFILE"
+            "$FINAL_VIDEO_PATH"
 
-          echo "Final video:"
-          ls -lh "$OUTFILE"
+          if [ ! -s "$FINAL_VIDEO_PATH" ]; then
+            echo "ERROR: Final video was not created."
+            exit 1
+          fi
 
-          FILE_SIZE=$(stat -c%s "$OUTFILE")
-          echo "Final file size in bytes: $FILE_SIZE"
+          echo "Final video created:"
+          ls -lh "$FINAL_VIDEO_PATH"
 
-          echo "OUTFILE=$OUTFILE" >> $GITHUB_ENV
-          echo "FILE_SIZE=$FILE_SIZE" >> $GITHUB_ENV
+          ffprobe -v error \
+            -show_entries format=duration,size \
+            -of default=noprint_wrappers=1 "$FINAL_VIDEO_PATH"
+
+      - name: Create YouTube upload script
+        shell: bash
+        run: |
+          cat > scripts/upload_to_youtube.py <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import random
+
+          from google.oauth2.credentials import Credentials
+          from google.auth.transport.requests import Request
+          from googleapiclient.discovery import build
+          from googleapiclient.errors import HttpError
+          from googleapiclient.http import MediaFileUpload
+
+          SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
+
+          def clean_text(value, fallback):
+              if value is None:
+                  return fallback
+              value = str(value).strip()
+              return value if value else fallback
+
+          def normalize_tags(value):
+              if not value:
+                  return []
+              if isinstance(value, list):
+                  return [str(tag).strip() for tag in value if str(tag).strip()][:30]
+              if isinstance(value, str):
+                  return [tag.strip() for tag in value.split(",") if tag.strip()][:30]
+              return []
+
+          def resumable_upload(request):
+              response = None
+              error = None
+              retry = 0
+              max_retries = 10
+
+              while response is None:
+                  try:
+                      print("Uploading chunk...")
+                      status, response = request.next_chunk()
+
+                      if status:
+                          print(f"Upload progress: {int(status.progress() * 100)}%")
+
+                      if response is not None:
+                          if "id" in response:
+                              print(f"Upload complete. YouTube video ID: {response['id']}")
+                              return response["id"]
+
+                          raise RuntimeError(f"Unexpected upload response: {response}")
+
+                  except HttpError as e:
+                      if e.resp.status in [500, 502, 503, 504]:
+                          error = f"Retriable HTTP error {e.resp.status}: {e}"
+                      else:
+                          raise
+
+                  except Exception as e:
+                      error = f"Retriable upload error: {e}"
+
+                  if error:
+                      retry += 1
+                      if retry > max_retries:
+                          raise RuntimeError(f"Upload failed after {max_retries} retries. Last error: {error}")
+
+                      sleep_seconds = min((2 ** retry) + random.random(), 120)
+                      print(f"{error}")
+                      print(f"Retrying in {sleep_seconds:.1f}s...")
+                      time.sleep(sleep_seconds)
+                      error = None
+
+          def main():
+              payload_path = "payload.json"
+              video_path = os.environ.get("FINAL_VIDEO_PATH", "output/final_sleep_video.mp4")
+
+              if not os.path.exists(payload_path):
+                  raise FileNotFoundError("payload.json not found")
+
+              if not os.path.exists(video_path):
+                  raise FileNotFoundError(f"Video file not found: {video_path}")
+
+              with open(payload_path, "r", encoding="utf-8") as f:
+                  payload = json.load(f)
+
+              title = clean_text(
+                  payload.get("title"),
+                  "Deep Sleep Music | 4 Hours Relaxing Night Sky Meditation"
+              )
+
+              description = clean_text(
+                  payload.get("description"),
+                  "Peaceful deep sleep music with calming night sky ambience, relaxing meditation sounds, and soothing ambient atmosphere for rest, focus, relaxation, and quiet sleep."
+              )
+
+              category_id = clean_text(payload.get("category_id"), "10")
+              privacy_status = clean_text(payload.get("privacy_status"), "private").lower()
+
+              if privacy_status not in ["private", "unlisted", "public"]:
+                  print(f"Invalid privacy_status '{privacy_status}', falling back to private.")
+                  privacy_status = "private"
+
+              tags = normalize_tags(payload.get("tags"))
+
+              client_id = os.environ["YOUTUBE_CLIENT_ID"]
+              client_secret = os.environ["YOUTUBE_CLIENT_SECRET"]
+              refresh_token = os.environ["YOUTUBE_REFRESH_TOKEN"]
+
+              credentials = Credentials(
+                  token=None,
+                  refresh_token=refresh_token,
+                  token_uri="https://oauth2.googleapis.com/token",
+                  client_id=client_id,
+                  client_secret=client_secret,
+                  scopes=SCOPES,
+              )
+
+              credentials.refresh(Request())
+
+              youtube = build("youtube", "v3", credentials=credentials)
+
+              body = {
+                  "snippet": {
+                      "title": title[:100],
+                      "description": description,
+                      "categoryId": category_id,
+                  },
+                  "status": {
+                      "privacyStatus": privacy_status,
+                      "selfDeclaredMadeForKids": False,
+                  },
+              }
+
+              if tags:
+                  body["snippet"]["tags"] = tags
+
+              print("Uploading to YouTube with metadata:")
+              print(json.dumps(body, indent=2, ensure_ascii=False))
+
+              media = MediaFileUpload(
+                  video_path,
+                  chunksize=50 * 1024 * 1024,
+                  resumable=True,
+                  mimetype="video/mp4"
+              )
+
+              request = youtube.videos().insert(
+                  part="snippet,status",
+                  body=body,
+                  media_body=media
+              )
+
+              video_id = resumable_upload(request)
+
+              with open("youtube_video_id.txt", "w", encoding="utf-8") as f:
+                  f.write(video_id + "\n")
+
+              print(f"YouTube Studio should now show the video as: {privacy_status}")
+              print(f"Video ID: {video_id}")
+
+          if __name__ == "__main__":
+              main()
+          PY
 
       - name: Upload video directly to YouTube
+        shell: bash
         env:
           YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          FINAL_VIDEO_PATH: ${{ env.FINAL_VIDEO_PATH }}
         run: |
-          python <<'PY'
-          import os
-          import json
-          from google.oauth2.credentials import Credentials
-          from google.auth.transport.requests import Request
-          from googleapiclient.discovery import build
-          from googleapiclient.http import MediaFileUpload
+          set -euo pipefail
 
-          with open("payload.json", "r", encoding="utf-8") as f:
-              payload = json.load(f)
-
-          title = payload.get("title") or "Deep Sleep Music | 4 Hours Peaceful Night Sky Meditation"
-          description = payload.get("description") or (
-              "Relax into deep rest with peaceful deep sleep music, calming night sky ambience, "
-              "and soothing meditation sounds created for relaxation, sleep, focus, and quiet evening routines."
-          )
-
-          category_id = str(payload.get("category_id") or "10")
-          privacy_status = payload.get("privacy_status") or "private"
-          outfile = os.environ.get("OUTFILE", "deep-sleep-frequency-4-hours.mp4")
-
-          tags = [
-              "deep sleep music",
-              "sleep music",
-              "meditation music",
-              "relaxing music",
-              "night sky music",
-              "4 hours sleep music",
-              "calming music",
-              "peaceful sleep",
-              "ambient sleep music",
-              "healing frequency music",
-              "reiki music",
-              "stress relief music",
-              "relaxation music",
-              "sleep meditation",
-              "deep relaxation"
-          ]
-
-          creds = Credentials(
-              token=None,
-              refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
-              token_uri="https://oauth2.googleapis.com/token",
-              client_id=os.environ["YOUTUBE_CLIENT_ID"],
-              client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
-              scopes=["https://www.googleapis.com/auth/youtube.upload"]
-          )
-
-          creds.refresh(Request())
-
-          youtube = build("youtube", "v3", credentials=creds)
-
-          body = {
-              "snippet": {
-                  "title": title[:100],
-                  "description": description[:5000],
-                  "tags": tags,
-                  "categoryId": category_id
-              },
-              "status": {
-                  "privacyStatus": privacy_status,
-                  "selfDeclaredMadeForKids": False
-              }
-          }
-
-          media = MediaFileUpload(
-              outfile,
-              chunksize=8 * 1024 * 1024,
-              resumable=True,
-              mimetype="video/mp4"
-          )
-
-          request = youtube.videos().insert(
-              part="snippet,status",
-              body=body,
-              media_body=media
-          )
-
-          response = None
-          while response is None:
-              status, response = request.next_chunk()
-              if status:
-                  print(f"Upload progress: {int(status.progress() * 100)}%")
-
-          print("YouTube upload complete.")
-          print("Video ID:", response.get("id"))
-          print("Video URL:", f"https://www.youtube.com/watch?v={response.get('id')}")
-          PY
-
-      - name: Create GitHub release backup
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="render-${{ github.run_id }}-$(date +%Y%m%d-%H%M%S)"
-          RELEASE_TITLE="Rendered Sleep Video ${{ github.run_id }}"
-
-          echo "Creating backup release: $TAG"
-          echo "File size: $FILE_SIZE bytes"
-
-          if [ "$FILE_SIZE" -ge 2147483648 ]; then
-            echo "File is too large for GitHub Release asset."
-            echo "Skipping GitHub release backup."
-            exit 0
+          if [ -z "${YOUTUBE_CLIENT_ID:-}" ]; then
+            echo "ERROR: Missing YOUTUBE_CLIENT_ID secret."
+            exit 1
           fi
 
-          gh release create "$TAG" "$OUTFILE" \
-            --title "$RELEASE_TITLE" \
-            --notes "Automatically rendered sleep/meditation video backup."
+          if [ -z "${YOUTUBE_CLIENT_SECRET:-}" ]; then
+            echo "ERROR: Missing YOUTUBE_CLIENT_SECRET secret."
+            exit 1
+          fi
 
-      - name: Upload video artifact backup
+          if [ -z "${YOUTUBE_REFRESH_TOKEN:-}" ]; then
+            echo "ERROR: Missing YOUTUBE_REFRESH_TOKEN secret."
+            exit 1
+          fi
+
+          python3 scripts/upload_to_youtube.py
+
+      - name: Upload small logs as artifact
+        if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
-          name: rendered-sleep-video
-          path: "*.mp4"
+          name: render-sleep-video-logs
+          path: |
+            payload.json
+            clip_urls.txt
+            youtube_video_id.txt
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Optional final video artifact backup
+        if: env.CREATE_ARTIFACT_BACKUP == 'true'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-sleep-video-backup
+          path: output/final_sleep_video.mp4
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
