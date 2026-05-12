@@ -267,20 +267,20 @@ jobs:
           ffmpeg -y \
             -stream_loop -1 \
             -i "$MASTER_LOOP_PATH" \
+            -stream_loop -1 \
             -i source_audio.mp3 \
             -t "$DURATION_SECONDS" \
             -map 0:v:0 \
             -map 1:a:0 \
             -c:v libx264 \
             -preset veryfast \
-            -crf 23 \
+            -crf 22 \
             -pix_fmt yuv420p \
             -r 30 \
             -c:a aac \
             -b:a 192k \
             -ar 48000 \
             -ac 2 \
-            -shortest \
             -movflags +faststart \
             "$FINAL_VIDEO_PATH"
 
