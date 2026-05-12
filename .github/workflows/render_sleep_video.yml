@@ -203,14 +203,14 @@ jobs:
           set -euo pipefail
 
           echo "Creating master loop from ordered clips:"
-          echo "01 = Make HTTP 11"
-          echo "02 = Make HTTP 12"
-          echo "03 = Make HTTP 13"
-          echo "04 = Make HTTP 42"
-          echo "05 = Make HTTP 43"
-          echo "06 = Make HTTP 44"
-          echo "07 = Make HTTP 46"
-          echo "08 = Make HTTP 50"
+          echo "01 = Make clip 1"
+          echo "02 = Make clip 2"
+          echo "03 = Make clip 3"
+          echo "04 = Make clip 4"
+          echo "05 = Make clip 5"
+          echo "06 = Make clip 6"
+          echo "07 = Make clip 7"
+          echo "08 = Make clip 8"
 
           ffmpeg -y \
             -i normalized/clip_01.mp4 \
@@ -304,9 +304,11 @@ jobs:
           import os
           import time
           import random
+          import sys
 
           from google.oauth2.credentials import Credentials
           from google.auth.transport.requests import Request
+          from google.auth.exceptions import RefreshError
           from googleapiclient.discovery import build
           from googleapiclient.errors import HttpError
           from googleapiclient.http import MediaFileUpload
@@ -402,9 +404,28 @@ jobs:
 
               tags = normalize_tags(payload.get("tags"))
 
-              client_id = os.environ["YOUTUBE_CLIENT_ID"]
-              client_secret = os.environ["YOUTUBE_CLIENT_SECRET"]
-              refresh_token = os.environ["YOUTUBE_REFRESH_TOKEN"]
+              client_id = os.environ.get("YOUTUBE_CLIENT_ID", "").strip()
+              client_secret = os.environ.get("YOUTUBE_CLIENT_SECRET", "").strip()
+              refresh_token = os.environ.get("YOUTUBE_REFRESH_TOKEN", "").strip()
+
+              print("Checking YouTube OAuth secrets...")
+
+              if not client_id:
+                  raise ValueError("YOUTUBE_CLIENT_ID is empty.")
+
+              if not client_secret:
+                  raise ValueError("YOUTUBE_CLIENT_SECRET is empty.")
+
+              if not refresh_token:
+                  raise ValueError("YOUTUBE_REFRESH_TOKEN is empty.")
+
+              if not client_id.endswith(".apps.googleusercontent.com"):
+                  raise ValueError("YOUTUBE_CLIENT_ID does not look like a valid Google OAuth Client ID.")
+
+              print(f"Client ID suffix: ...{client_id[-35:]}")
+              print(f"Client Secret length: {len(client_secret)}")
+              print(f"Refresh Token prefix: {refresh_token[:4]}...")
+              print(f"Refresh Token length: {len(refresh_token)}")
 
               credentials = Credentials(
                   token=None,
@@ -415,7 +436,21 @@ jobs:
                   scopes=SCOPES,
               )
 
-              credentials.refresh(Request())
+              print("Refreshing YouTube OAuth token...")
+
+              try:
+                  credentials.refresh(Request())
+              except RefreshError as e:
+                  print("ERROR: YouTube OAuth token refresh failed.")
+                  print("Most likely causes:")
+                  print("1. YOUTUBE_CLIENT_ID is wrong or from deleted OAuth client.")
+                  print("2. YOUTUBE_CLIENT_SECRET does not belong to this Client ID.")
+                  print("3. YOUTUBE_REFRESH_TOKEN was generated from a different OAuth client.")
+                  print("4. GitHub Secrets contain spaces, line breaks, or old values.")
+                  print(f"Raw error: {e}")
+                  sys.exit(1)
+
+              print("YouTube OAuth token refreshed successfully.")
 
               youtube = build("youtube", "v3", credentials=credentials)
 
